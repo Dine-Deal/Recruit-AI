@@ -1,0 +1,82 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ats_user
+      POSTGRES_PASSWORD: ats_pass
+      POSTGRES_DB: ats_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ats_user -d ats_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI Backend ─────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ats_user:ats_pass@postgres:5432/ats_db
+      DEBUG: "false"
+      LOG_LEVEL: INFO
+      # Add your Microsoft Graph credentials here or via .env file
+      MS_TENANT_ID: ${MS_TENANT_ID:-}
+      MS_CLIENT_ID: ${MS_CLIENT_ID:-}
+      MS_CLIENT_SECRET: ${MS_CLIENT_SECRET:-}
+      MS_USER_EMAIL: ${MS_USER_EMAIL:-}
+      SECRET_KEY: ${SECRET_KEY:-CHANGE_ME_IN_PRODUCTION}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./Applications:/app/Applications
+      - ./Outputs:/app/Outputs
+      - ./faiss_indices:/app/faiss_indices
+      - ./JD_Master.xlsx:/app/JD_Master.xlsx
+      - ./processed_resumes.json:/app/processed_resumes.json
+
+  # ── Email intake worker ─────────────────────────────────────────────────────
+  email_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -c "from pipeline.email_intake import EmailIntakeService; EmailIntakeService().run_polling_loop()"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ats_user:ats_pass@postgres:5432/ats_db
+      MS_TENANT_ID: ${MS_TENANT_ID:-}
+      MS_CLIENT_ID: ${MS_CLIENT_ID:-}
+      MS_CLIENT_SECRET: ${MS_CLIENT_SECRET:-}
+      MS_USER_EMAIL: ${MS_USER_EMAIL:-}
+    volumes:
+      - ./Applications:/app/Applications
+
+  # ── React Frontend ──────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
