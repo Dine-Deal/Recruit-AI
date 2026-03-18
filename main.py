@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
@@ -78,18 +79,15 @@ async def _create_tables_with_retry(max_attempts: int = 5) -> None:
         except Exception as exc:
             err_msg = str(exc).strip() or type(exc).__name__
             if attempt == max_attempts:
-                logger.error(
-                    f"Could not connect to database after {max_attempts} attempts.\n"
-                    f"Last error: {err_msg}\n"
-                    "The API will start — DB operations will succeed once Neon wakes fully.\n"
-                    "Try hitting any API endpoint in ~30 seconds; pool_pre_ping will reconnect."
+                # DO NOT raise — let the app start anyway
+                # pool_pre_ping=True will reconnect on first API request
+                logger.warning(
+                    f"DB not ready after {max_attempts} attempts ({err_msg}). "
+                    "App starting anyway — will reconnect on first request."
                 )
                 return
-            wait = attempt * 8   # 8s, 16s, 24s, 32s
-            logger.warning(
-                f"DB attempt {attempt}/{max_attempts} failed: {err_msg}. "
-                f"Retrying in {wait}s…"
-            )
+            wait = attempt * 5
+            logger.warning(f"DB attempt {attempt}/{max_attempts} failed: {err_msg}. Retrying in {wait}s…")
             await asyncio.sleep(wait)
 
 
@@ -118,7 +116,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[str(o) for o in settings.ALLOWED_ORIGINS],
+    allow_origins=[o.strip() for o in settings.ALLOWED_ORIGINS.split(",")],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
