@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     # ── Database ──────────────────────────────────────────────────────────────
-    DATABASE_URL: str = "postgresql+asyncpg://ats_user:ats_pass@localhost:5432/ats_db"
+    DATABASE_URL: str = "postgresql+asyncpg://user:pass@ep-xxx-pooler.neon.tech/neondb"
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
 
@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480   # 8 hrs
 
     # ── CORS ──────────────────────────────────────────────────────────────────
-    ALLOWED_ORIGINS: list[AnyHttpUrl | str] = ["http://localhost:3000", "http://localhost:5173"]
+    ALLOWED_ORIGINS: list[AnyHttpUrl | str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:4173"]
 
     def ensure_directories(self) -> None:
         """Create all required directories on startup."""
