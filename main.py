@@ -41,6 +41,7 @@ async def _wake_neon(host: str) -> None:
 
 
 async def _create_tables_with_retry(max_attempts: int = 5) -> None:
+    """Initialize database tables with retry logic (runs in background)"""
     db_url = settings.DATABASE_URL
     host = _extract_neon_host(db_url)
 
@@ -74,8 +75,12 @@ async def _create_tables_with_retry(max_attempts: int = 5) -> None:
 async def lifespan(app: FastAPI):
     settings.ensure_directories()
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
-    await _create_tables_with_retry()
+    
+    # Start database initialization in background (non-blocking)
+    asyncio.create_task(_create_tables_with_retry())
+    
     yield
+    
     await engine.dispose()
     logger.info("Shutting down ATS API.")
 
@@ -109,11 +114,15 @@ app.include_router(upload_router)
 
 @app.get("/health", tags=["health"])
 async def health() -> dict:
+    """Health check endpoint - returns immediately even if DB is initializing"""
     try:
         from sqlalchemy import text
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
+        async with asyncio.timeout(2):  # Quick timeout to avoid blocking
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
         db_status = "connected"
+    except asyncio.TimeoutError:
+        db_status = "initializing"
     except Exception as e:
         db_status = f"unavailable ({type(e).__name__})"
 
