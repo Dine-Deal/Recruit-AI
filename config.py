@@ -17,6 +17,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",   # ignore unknown env vars — prevents BOM/encoding issues
     )
 
     # ── Application ───────────────────────────────────────────────────────────
@@ -64,7 +65,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480   # 8 hrs
 
     # ── CORS ──────────────────────────────────────────────────────────────────
-    ALLOWED_ORIGINS: list[AnyHttpUrl | str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:4173"]
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:5173,http://localhost:4173"
 
     def ensure_directories(self) -> None:
         """Create all required directories on startup."""

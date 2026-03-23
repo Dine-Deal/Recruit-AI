@@ -194,14 +194,16 @@ roles_router = APIRouter(prefix="/roles", tags=["roles"])
 
 
 @roles_router.get("/", response_model=list[JobRoleOut])
-async def list_roles(db: DB, _: CurrentUser) -> list[JobRole]:
-    result = await db.execute(select(JobRole).order_by(JobRole.role_name))
+async def list_roles(db: DB, user: CurrentUser) -> list[JobRole]:
+    result = await db.execute(
+        select(JobRole).where(JobRole.owner_id == user.id).order_by(JobRole.role_name)
+    )
     return result.scalars().all()
 
 
 @roles_router.get("/{role_id}", response_model=JobRoleOut)
-async def get_role(role_id: uuid.UUID, db: DB, _: CurrentUser) -> JobRole:
-    result = await db.execute(select(JobRole).where(JobRole.id == role_id))
+async def get_role(role_id: uuid.UUID, db: DB, user: CurrentUser) -> JobRole:
+    result = await db.execute(select(JobRole).where(JobRole.id == role_id, JobRole.owner_id == user.id))
     role = result.scalar_one_or_none()
     if not role:
         raise HTTPException(404, "Role not found")
@@ -209,10 +211,13 @@ async def get_role(role_id: uuid.UUID, db: DB, _: CurrentUser) -> JobRole:
 
 
 @roles_router.post("/", response_model=JobRoleOut, status_code=201)
-async def create_role(payload: JobRoleIn, db: DB, _: CurrentUser) -> JobRole:
+async def create_role(payload: JobRoleIn, db: DB, user: CurrentUser) -> JobRole:
     # Check for existing role with same folder_name — prevent duplicates
     existing = await db.execute(
-        select(JobRole).where(JobRole.folder_name == payload.folder_name)
+        select(JobRole).where(
+            JobRole.folder_name == payload.folder_name,
+            JobRole.owner_id == user.id
+        )
     )
     if existing.scalar_one_or_none():
         raise HTTPException(
@@ -220,7 +225,7 @@ async def create_role(payload: JobRoleIn, db: DB, _: CurrentUser) -> JobRole:
             f"A role with folder_name '{payload.folder_name}' already exists. "
             "Use Edit to update it instead of creating a new one."
         )
-    role = JobRole(**payload.model_dump())
+    role = JobRole(**payload.model_dump(), owner_id=user.id)
     db.add(role)
     await db.commit()
     await db.refresh(role)
@@ -230,13 +235,13 @@ async def create_role(payload: JobRoleIn, db: DB, _: CurrentUser) -> JobRole:
 
 @roles_router.put("/{role_id}", response_model=JobRoleOut)
 async def update_role(
-    role_id: uuid.UUID, payload: JobRoleIn, db: DB, _: CurrentUser
+    role_id: uuid.UUID, payload: JobRoleIn, db: DB, user: CurrentUser
 ) -> JobRole:
     """
     Update a job role's JD and requirements.
     Candidate data is NEVER touched — only the role definition changes.
     """
-    result = await db.execute(select(JobRole).where(JobRole.id == role_id))
+    result = await db.execute(select(JobRole).where(JobRole.id == role_id, JobRole.owner_id == user.id))
     role = result.scalar_one_or_none()
     if not role:
         raise HTTPException(404, "Role not found")
@@ -261,10 +266,10 @@ async def update_role(
 async def delete_role(
     role_id: uuid.UUID,
     db: DB,
-    _: CurrentUser,
+    user: CurrentUser,
     delete_candidates: bool = Query(
         default=False,
-        description="Set to true to also delete all candidates. Default: candidates are kept."
+        description="Set to true to also delete all candidates. Default: candidates are kept.",
     ),
 ) -> Response:
     """
@@ -272,7 +277,7 @@ async def delete_role(
     By default candidates are KEPT (job_role_id becomes NULL).
     Pass ?delete_candidates=true to also wipe candidate records.
     """
-    result = await db.execute(select(JobRole).where(JobRole.id == role_id))
+    result = await db.execute(select(JobRole).where(JobRole.id == role_id, JobRole.owner_id == user.id))
     role = result.scalar_one_or_none()
     if not role:
         raise HTTPException(404, "Role not found")
@@ -314,7 +319,7 @@ candidates_router = APIRouter(prefix="/candidates", tags=["candidates"])
 @candidates_router.get("/", response_model=list[CandidateOut])
 async def list_candidates(
     db: DB,
-    _: CurrentUser,
+    user: CurrentUser,
     role_id: Optional[uuid.UUID] = None,
     min_score: float = Query(default=0.0, ge=0, le=1),
     min_experience: float = Query(default=0.0, ge=0),
@@ -322,7 +327,12 @@ async def list_candidates(
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[Candidate]:
-    stmt = select(Candidate).order_by(Candidate.final_score.desc())
+    stmt = (
+        select(Candidate)
+        .join(JobRole, Candidate.job_role_id == JobRole.id)
+        .where(JobRole.owner_id == user.id)
+        .order_by(Candidate.final_score.desc())
+    )
 
     if role_id:
         stmt = stmt.where(Candidate.job_role_id == role_id)
@@ -333,9 +343,16 @@ async def list_candidates(
     if skills:
         skill_list = [s.strip().lower() for s in skills.split(",")]
         for skill in skill_list:
-            stmt = stmt.where(
-                func.lower(func.array_to_string(Candidate.skills, " ")).contains(skill)
-            )
+            # Use JSON_EXTRACT for SQLite, array_to_string for Postgres
+            from config import settings as _s
+            if "sqlite" in _s.DATABASE_URL:
+                stmt = stmt.where(
+                    func.lower(func.coalesce(Candidate.skills, "")).contains(skill)
+                )
+            else:
+                stmt = stmt.where(
+                    func.lower(func.array_to_string(Candidate.skills, " ")).contains(skill)
+                )
 
     stmt = stmt.limit(limit).offset(offset)
     result = await db.execute(stmt)

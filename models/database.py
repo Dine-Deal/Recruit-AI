@@ -75,12 +75,20 @@ class JobRole(Base):
     minimum_experience: Mapped[Optional[int]] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(20), default="Active")
     custom_folder_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    # ── Ownership — each role belongs to one recruiter ────────────────────────
+    owner_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     candidates: Mapped[list["Candidate"]] = relationship(
         back_populates="job_role", passive_deletes=True,
     )
+    owner: Mapped[Optional["User"]] = relationship("User", foreign_keys=[owner_id])
 
 
 class Candidate(Base):
