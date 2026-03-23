@@ -1037,3 +1037,68 @@ function JDEditor({ roles, onSave }) {
     </div>
   );
 }
+
+
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+export default function App() {
+  const [authed, setAuthed] = useState(!!getToken());
+  const [tab, setTab] = useState("pipeline");
+  const [roles, setRoles] = useState([]);
+  const [activeRole, setActiveRole] = useState(null);
+
+  const fetchRoles = useCallback(async () => {
+    if (!getToken()) return;
+    try { setRoles(await apiFetch("/roles/") || []); } catch {}
+  }, []);
+
+  useEffect(() => { if (authed) fetchRoles(); }, [authed, fetchRoles]);
+
+  const logout = () => { clearToken(); setAuthed(false); };
+
+  if (!authed) return <LoginPage onLogin={() => setAuthed(true)} />;
+
+  const navBtn = (key, label) => (
+    <button key={key} onClick={() => setTab(key)} style={{
+      padding: "8px 16px", borderRadius: 8, fontSize: 13, fontWeight: 600,
+      cursor: "pointer", border: "none",
+      background: tab === key ? "#eff6ff" : "transparent",
+      color: tab === key ? "#2563eb" : "#374151",
+    }}>{label}</button>
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#f8fafc", fontFamily: "'Inter', system-ui, sans-serif" }}>
+      <div style={{ background: "#fff", borderBottom: "1px solid #e5e7eb", padding: "0 24px", display: "flex", alignItems: "center", height: 56, gap: 4 }}>
+        <div style={{ fontWeight: 800, fontSize: 17, color: "#0f172a", marginRight: 24 }}>🤖 AI-ATS</div>
+        {[["pipeline", "Pipeline"], ["candidates", "Candidates"], ["jobs", "Job Roles"]].map(([k, l]) => navBtn(k, l))}
+        <div style={{ flex: 1 }} />
+        <button onClick={logout} style={{ padding: "8px 16px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer", border: "none", background: "transparent", color: "#ef4444" }}>Sign out</button>
+      </div>
+
+      <div style={{ maxWidth: 1100, margin: "0 auto", padding: 24 }}>
+        {tab === "pipeline" && <PipelinePanel roles={roles} onRolesChange={fetchRoles} />}
+
+        {tab === "candidates" && (
+          <div style={{ background: "#fff", borderRadius: 12, padding: 24, border: "1px solid #e5e7eb" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 700, color: "#0f172a", margin: 0 }}>Ranked Candidates</h2>
+              <select value={activeRole || ""} onChange={e => setActiveRole(e.target.value || null)}
+                style={{ padding: "7px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13 }}>
+                <option value="">All roles</option>
+                {roles.map(r => <option key={r.id} value={r.id}>{r.role_name}</option>)}
+              </select>
+            </div>
+            <CandidatesTable roleId={activeRole} />
+          </div>
+        )}
+
+        {tab === "jobs" && (
+          <div style={{ background: "#fff", borderRadius: 12, padding: 24, border: "1px solid #e5e7eb" }}>
+            <JDEditor roles={roles} onSave={fetchRoles} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
