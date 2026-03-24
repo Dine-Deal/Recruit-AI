@@ -222,93 +222,6 @@ function CandidateModal({ candidate: c, onClose }) {
   );
 }
 
-// ── Top 5 candidates card ─────────────────────────────────────────────────────
-function Top5Card({ roleName, candidates, onViewCandidate }) {
-  const medalColors = ["#f59e0b", "#9ca3af", "#b45309", "#6b7280", "#6b7280"];
-  const medals = ["🥇", "🥈", "🥉", "4th", "5th"];
-
-  return (
-    <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden", marginBottom: 16 }}>
-      {/* Role header */}
-      <div style={{ background: "#1e40af", padding: "12px 18px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div>
-          <div style={{ color: "#fff", fontWeight: 700, fontSize: 15 }}>{roleName}</div>
-          <div style={{ color: "#93c5fd", fontSize: 12, marginTop: 2 }}>Top {candidates.length} candidate{candidates.length !== 1 ? "s" : ""}</div>
-        </div>
-        <div style={{ background: "#1d4ed8", padding: "4px 12px", borderRadius: 20, color: "#bfdbfe", fontSize: 12, fontWeight: 600 }}>
-          Best: {Math.round((candidates[0]?.final_score || 0) * 100)}/100
-        </div>
-      </div>
-
-      {/* Candidates list */}
-      <div>
-        {candidates.map((c, i) => (
-          <div key={c.id} style={{
-            display: "flex", alignItems: "center", padding: "12px 18px", gap: 12,
-            borderBottom: i < candidates.length - 1 ? "1px solid #f3f4f6" : "none",
-            background: i === 0 ? "#fffbeb" : "#fff",
-          }}>
-            {/* Medal / rank */}
-            <div style={{ fontSize: i < 3 ? 20 : 14, minWidth: 28, textAlign: "center", color: medalColors[i], fontWeight: 700 }}>
-              {medals[i]}
-            </div>
-
-            {/* Info */}
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 600, fontSize: 14, color: "#0f172a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                {c.name || "Unknown"}
-              </div>
-              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
-                {c.email || "—"} {c.experience_years ? `· ${c.experience_years}y exp` : ""}
-              </div>
-              {c.skills?.length > 0 && (
-                <div style={{ marginTop: 4 }}><SkillPills skills={c.skills} max={4} /></div>
-              )}
-            </div>
-
-            {/* Score */}
-            <div style={{ minWidth: 100 }}>
-              <ScoreBar value={c.final_score || 0} />
-            </div>
-
-            {/* Actions */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 80 }}>
-              <button
-                onClick={() => onViewCandidate(c)}
-                style={{ padding: "4px 10px", background: "#eff6ff", color: "#2563eb", border: "1px solid #bfdbfe", borderRadius: 6, fontSize: 11, cursor: "pointer", fontWeight: 600, textAlign: "center" }}>
-                View
-              </button>
-              <button
-                onClick={async () => {
-                  try {
-                    const res = await fetch(`${API}/candidates/${c.id}/download`, { headers: { Authorization: `Bearer ${getToken()}` } });
-                    if (!res.ok) {
-                      alert("Resume not available on server.\n\nNote: Resume files are stored on the machine that ran the pipeline. To make downloads work after hosting, configure cloud storage (S3/Cloudinary) in your settings.");
-                      return;
-                    }
-                    const blob = await res.blob();
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a"); a.href = url; a.download = c.file_name; a.click();
-                    URL.revokeObjectURL(url);
-                  } catch (e) { alert("Download failed: " + e.message); }
-                }}
-                style={{ padding: "4px 10px", background: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0", borderRadius: 6, fontSize: 11, cursor: "pointer", fontWeight: 600, textAlign: "center" }}>
-                ↓ Resume
-              </button>
-            </div>
-          </div>
-        ))}
-
-        {candidates.length === 0 && (
-          <div style={{ padding: "20px 18px", color: "#9ca3af", fontSize: 13, textAlign: "center" }}>
-            No candidates processed for this role yet.
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ── Pipeline panel ────────────────────────────────────────────────────────────
 function PipelinePanel({ roles, onRolesChange }) {
   const [pipelineStatus, setPipelineStatus]   = useState(null);
@@ -448,6 +361,7 @@ function PipelinePanel({ roles, onRolesChange }) {
 
   const isRunning = loading || pipelineStatus?.running;
   const medals    = ['🥇', '🥈', '🥉', '4th', '5th'];
+
   // Display only the role(s) that match current selection from cache
   // If a specific role is selected, show only that role
   // If "All roles", show everything in cache sorted alphabetically
@@ -699,7 +613,7 @@ function PipelinePanel({ roles, onRolesChange }) {
               Top 5 Candidates
               {selectedRole
                 ? ` — ${roles.find(r => r.folder_name === selectedRole)?.role_name || selectedRole}`
-                : sortedRoleNames.length > 0
+                : displayRoleNames.length > 0
                   ? ` — All Roles (${displayRoleNames.length})`
                   : ''}
             </h2>
