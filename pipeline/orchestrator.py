@@ -97,7 +97,7 @@ class PipelineOrchestrator:
             if custom:
                 folder = Path(custom)
             else:
-                folder = settings.APPLICATIONS_DIR / jd_entry["folder_name"]
+                folder = jd_entry["folder_name"]
 
             if folder.exists() and folder.is_dir():
                 folders.append(folder)
