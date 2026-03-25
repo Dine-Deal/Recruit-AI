@@ -1,22 +1,7 @@
 """
 pipeline/orchestrator.py
 ─────────────────────────
-The central processing pipeline.  Runs folder-by-folder and coordinates:
-
-  1. JD retrieval (JDManager)
-  2. Duplicate check (ProcessedRegistry)
-  3. Text extraction + NER (resume_parser)
-  4. Embedding generation (embeddings)
-  5. FAISS storage (vector_store)
-  6. Semantic matching + scoring (scorer)
-  7. DB persistence (async SQLAlchemy)
-  8. Excel report generation (excel_reporter)
-
-Usage
-─────
-    orch = PipelineOrchestrator()
-    result = asyncio.run(orch.run_all())
-    print(result)
+Pipeline that reads roles directly from the database (not JD_Master.xlsx).
 """
 
 from __future__ import annotations
@@ -27,19 +12,20 @@ from pathlib import Path
 from typing import Optional
 
 from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from config import settings
 from models.database import Base, Candidate, JobRole, ProcessingLog
 from pipeline.embeddings import build_resume_text, cosine_similarity, embed_text
 from pipeline.excel_reporter import generate_excel_report
-from pipeline.jd_manager import compute_file_hash, get_jd_manager, get_registry
+from pipeline.jd_manager import compute_file_hash, get_registry
 from pipeline.resume_parser import parse_resume
 from pipeline.scorer import rank_candidates, score_candidate
 from pipeline.vector_store import get_vector_store
 
 
-# ── Pipeline result schema ────────────────────────────────────────────────────
+# ── Pipeline result ───────────────────────────────────────────────────────────
 
 class PipelineResult:
     def __init__(self) -> None:
@@ -49,6 +35,15 @@ class PipelineResult:
         self.errors: int = 0
         self.excel_path: Optional[Path] = None
 
+    def to_dict(self) -> dict:
+        return {
+            "roles":     len(self.roles_processed),
+            "processed": self.total_resumes,
+            "skipped":   self.skipped,
+            "errors":    self.errors,
+            "excel":     str(self.excel_path) if self.excel_path else None,
+        }
+
     def __repr__(self) -> str:
         return (
             f"roles={len(self.roles_processed)} | "
@@ -57,14 +52,6 @@ class PipelineResult:
             f"errors={self.errors}"
         )
 
-    def to_dict(self) -> dict:
-        return {
-            "roles": len(self.roles_processed),
-            "processed": self.total_resumes,
-            "skipped": self.skipped,
-            "errors": self.errors,
-        }
-
 
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
@@ -72,327 +59,286 @@ class PipelineOrchestrator:
     SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc"}
 
     def __init__(self) -> None:
-        self._jd = get_jd_manager()
-        self._registry = get_registry()
+        self._registry  = get_registry()
         self._vector_store = get_vector_store()
-        self._engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
+        self._engine    = create_async_engine(
+            settings.DATABASE_URL,
+            echo=False,
+            connect_args={"ssl": "require", "timeout": 30},
+        )
         self._session_factory = async_sessionmaker(
             self._engine, expire_on_commit=False
         )
 
-    # ── Role discovery ────────────────────────────────────────────────────
+    # ── Role loading from DB ──────────────────────────────────────────────────
 
-    def _discover_role_folders(self) -> list[Path]:
-        """
-        Return only folders that have an active JD.
-        Uses custom_folder_path from DB if set, otherwise defaults to
-        Applications/<folder_name>.
-        """
-        active_jds = self._jd.all_active()
-        folders: list[Path] = []
+    async def _load_active_roles(
+        self, owner_id: Optional[uuid.UUID] = None, folder_name: Optional[str] = None
+    ) -> list[JobRole]:
+        """Load active roles from DB — optionally filtered by owner or folder."""
+        async with self._session_factory() as session:
+            stmt = select(JobRole).where(JobRole.status == "Active")
+            if owner_id:
+                stmt = stmt.where(JobRole.owner_id == owner_id)
+            if folder_name:
+                stmt = stmt.where(JobRole.folder_name == folder_name)
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
 
-        for jd_entry in active_jds:
-            # Use custom path if recruiter configured one, else default
-            custom = jd_entry.get("custom_folder_path", "").strip()
-            if custom:
-                folder = Path(custom)
-            else:
-                folder = jd_entry["folder_name"]
-
-            if folder.exists() and folder.is_dir():
-                folders.append(folder)
-            else:
-                # Create the folder automatically if it doesn't exist
-                folder.mkdir(parents=True, exist_ok=True)
-                logger.info(f"Created folder: {folder}")
-                folders.append(folder)
-
-        logger.info(
-            f"Processing {len(folders)} active role folder(s): "
-            f"{[f.name for f in folders]}"
-        )
-        return sorted(folders, key=lambda p: p.name)
+    def _resolve_folder(self, role: JobRole) -> Path:
+        """Resolve the actual folder path for a role."""
+        folder_name = role.folder_name or ""
+        if folder_name.startswith(("C:\\", "C:/", "\\\\", "//")) or "/" in folder_name[1:3]:
+            return Path(folder_name)
+        elif "\\" in folder_name or "/" in folder_name:
+            return Path(folder_name)
+        else:
+            return settings.APPLICATIONS_DIR / folder_name
 
     def _get_unprocessed_resumes(self, folder: Path) -> list[Path]:
-        """Return resume files in a folder that haven't been processed yet."""
-        files: list[Path] = []
+        if not folder.exists():
+            folder.mkdir(parents=True, exist_ok=True)
+            return []
+        files = []
         for f in sorted(folder.iterdir()):
             if f.suffix.lower() not in self.SUPPORTED_EXTENSIONS:
                 continue
-            try:
-                h = compute_file_hash(f)
-            except Exception:
+            file_hash = compute_file_hash(f)
+            if self._registry.is_processed(str(folder.name), file_hash):
                 continue
-            if self._registry.is_processed(h):
-                logger.debug(f"Skipping (already processed): {f.name}")
-            else:
-                files.append(f)
+            files.append(f)
         return files
 
-    # ── DB helpers ────────────────────────────────────────────────────────
-
-    async def _get_or_create_role(
-        self, session: AsyncSession, jd_entry: dict
-    ) -> JobRole:
-        from sqlalchemy import select
-        stmt = select(JobRole).where(JobRole.folder_name == jd_entry["folder_name"])
-        result = await session.execute(stmt)
-        role = result.scalar_one_or_none()
-
-        if role is None:
-            role = JobRole(
-                role_name=jd_entry["role_name"],
-                folder_name=jd_entry["folder_name"],
-                job_description=jd_entry.get("job_description"),
-                must_have_skills=jd_entry.get("must_have_skills"),
-                good_to_have_skills=jd_entry.get("good_to_have_skills"),
-                minimum_experience=jd_entry.get("minimum_experience"),
-                status=jd_entry.get("status", "Active"),
-            )
-            session.add(role)
-            await session.flush()
-
-        return role
-
-    async def _persist_candidate(
-        self,
-        session: AsyncSession,
-        role_id: uuid.UUID,
-        parsed: dict,
-        file_hash: str,
-        scores: dict[str, float],
-    ) -> Candidate:
-        cand = Candidate(
-            job_role_id=role_id,
-            name=parsed.get("name"),
-            email=parsed.get("email"),
-            phone=parsed.get("phone"),
-            skills=parsed.get("skills"),
-            education=parsed.get("education"),
-            experience_years=parsed.get("experience_years"),
-            previous_companies=parsed.get("previous_companies"),
-            certifications=parsed.get("certifications"),
-            projects=parsed.get("projects"),
-            raw_text=parsed.get("raw_text", "")[:20000],
-            file_name=parsed["file_name"],
-            file_hash=file_hash,
-            file_path=parsed.get("file_path"),
-            semantic_score=scores["semantic_score"],
-            skill_score=scores["skill_score"],
-            experience_score=scores["experience_score"],
-            final_score=scores["final_score"],
-            role_name=jd_entry.get("role_name", ""),
-            folder_name=folder_name,
-            parsed_data={
-                "certifications": parsed.get("certifications"),
-                "projects": parsed.get("projects"),
-            },
-        )
-        session.add(cand)
-        await session.flush()
-        return cand
-
-    async def _log_processing(
-        self,
-        session: AsyncSession,
-        file_name: str,
-        file_hash: str,
-        role: str,
-        status: str,
-        error: Optional[str] = None,
-    ) -> None:
-        log = ProcessingLog(
-            file_name=file_name,
-            file_hash=file_hash,
-            role=role,
-            status=status,
-            error_message=error,
-        )
-        session.add(log)
-
-    # ── Single-resume processing ──────────────────────────────────────────
+    # ── Core processing ───────────────────────────────────────────────────────
 
     async def _process_resume(
         self,
-        session: AsyncSession,
         resume_path: Path,
-        folder_name: str,
-        jd_entry: dict,
-        jd_embedding: "np.ndarray",  # type: ignore[name-defined]
+        role: JobRole,
+        jd_embedding: list[float],
+        session: AsyncSession,
     ) -> Optional[dict]:
-        """
-        Processes one resume end-to-end.
-        Returns the candidate dict (with scores) or None on failure.
-        """
-        import numpy as np
-
-        file_name = resume_path.name
+        """Parse, embed, score and persist one resume. Returns candidate dict or None."""
         file_hash = compute_file_hash(resume_path)
+        folder_name = role.folder_name
 
-        try:
-            # 1. Parse
-            parsed = parse_resume(resume_path)
-
-            # 2. Embed
-            resume_text = build_resume_text(parsed)
-            resume_vec: np.ndarray = await asyncio.get_event_loop().run_in_executor(
-                None, embed_text, resume_text
+        # Double-check not already in DB
+        from sqlalchemy import and_
+        existing = await session.execute(
+            select(Candidate).where(
+                and_(
+                    Candidate.folder_name == folder_name,
+                    Candidate.file_hash == file_hash,
+                )
             )
-
-            # 3. Semantic similarity
-            sim = cosine_similarity(resume_vec, jd_embedding)
-
-            # 4. Composite score
-            scores = score_candidate(parsed, sim, jd_entry)
-
-            # 5. Persist to DB
-            role_obj = await self._get_or_create_role(session, jd_entry)
-            cand_obj = await self._persist_candidate(
-                session, role_obj.id, parsed, file_hash, scores
-            )
-
-            # 6. Store in FAISS
-            self._vector_store.add_vector(
-                role=folder_name,
-                candidate_id=str(cand_obj.id),
-                vector=resume_vec,
-            )
-
-            # 7. Update registry
-            self._registry.mark_processed(file_name, folder_name, file_hash)
-
-            # 8. Log
-            await self._log_processing(session, file_name, file_hash, folder_name, "success")
-
-            candidate_dict = {
-                **parsed,
-                **scores,
-                "id": str(cand_obj.id),
-                "folder_name": folder_name,
-                "role_name": jd_entry["role_name"],
-            }
-            logger.info(
-                f"  ✓ {file_name}: final_score={scores['final_score']:.3f} "
-                f"(sem={scores['semantic_score']:.2f}, "
-                f"skill={scores['skill_score']:.2f}, "
-                f"exp={scores['experience_score']:.2f})"
-            )
-            return candidate_dict
-
-        except Exception as exc:
-            logger.error(f"  ✗ {file_name}: {exc}")
-            await self._log_processing(
-                session, file_name, file_hash, folder_name, "error", str(exc)
-            )
+        )
+        if existing.scalar_one_or_none():
+            logger.debug(f"Skipping duplicate: {resume_path.name}")
             return None
 
-    # ── Per-role processing ───────────────────────────────────────────────
+        try:
+            # Parse
+            parsed = parse_resume(resume_path)
 
-    async def _process_role_folder(
-        self, folder: Path
-    ) -> tuple[str, list[dict]]:
-        """Process all unprocessed resumes in one role folder."""
-        folder_name = folder.name
-        role_candidates: list[dict] = []
+            # Embed
+            resume_text = build_resume_text(parsed)
+            resume_embedding = embed_text(resume_text)
 
-        jd_entry = self._jd.get(folder_name)
-        if jd_entry is None:
-            logger.warning(
-                f"No active JD found for folder '{folder_name}' — skipping folder."
-            )
-            return folder_name, []
+            # Store in FAISS
+            vs = self._vector_store
+            role_index = vs.get_or_create(folder_name)
+            vs.add(role_index, resume_embedding, str(resume_path))
 
-        logger.info(f"Processing role: {jd_entry['role_name']} ({folder_name})")
-
-        # Pre-compute JD embedding (once per folder)
-        jd_text = jd_entry.get("job_description", "") or ""
-        if not jd_text.strip():
-            jd_text = " ".join(
-                (jd_entry.get("must_have_skills") or [])
-                + (jd_entry.get("good_to_have_skills") or [])
+            # Score
+            scores = score_candidate(
+                resume_embedding=resume_embedding,
+                jd_embedding=jd_embedding,
+                candidate_skills=parsed.get("skills", []),
+                must_have_skills=role.must_have_skills or [],
+                good_to_have_skills=role.good_to_have_skills or [],
+                experience_years=parsed.get("experience_years"),
+                minimum_experience=role.minimum_experience or 0,
             )
 
-        jd_embedding = await asyncio.get_event_loop().run_in_executor(
-            None, embed_text, jd_text
-        )
+            # Persist to DB
+            candidate = Candidate(
+                job_role_id=role.id,
+                role_name=role.role_name,
+                folder_name=folder_name,
+                name=parsed.get("name"),
+                email=parsed.get("email"),
+                phone=parsed.get("phone"),
+                skills=parsed.get("skills", []),
+                education=parsed.get("education"),
+                experience_years=parsed.get("experience_years"),
+                previous_companies=parsed.get("previous_companies", []),
+                certifications=parsed.get("certifications", []),
+                projects=parsed.get("projects", []),
+                raw_text=(parsed.get("raw_text", ""))[:20000],
+                file_name=resume_path.name,
+                file_hash=file_hash,
+                file_path=str(resume_path),
+                semantic_score=scores["semantic_score"],
+                skill_score=scores["skill_score"],
+                experience_score=scores["experience_score"],
+                final_score=scores["final_score"],
+                parsed_data={
+                    "certifications": parsed.get("certifications"),
+                    "projects": parsed.get("projects"),
+                },
+            )
+            session.add(candidate)
+            await session.commit()
+            await session.refresh(candidate)
 
-        unprocessed = self._get_unprocessed_resumes(folder)
-        logger.info(f"  {len(unprocessed)} unprocessed resume(s) found.")
+            # Mark as processed in registry
+            self._registry.mark_processed(folder_name, file_hash, resume_path.name)
 
-        if not unprocessed:
-            return folder_name, []
+            logger.info(
+                f"✓ {resume_path.name} | score={scores['final_score']:.3f} | "
+                f"role={role.role_name}"
+            )
+            return {
+                "id": str(candidate.id),
+                "name": candidate.name,
+                "final_score": candidate.final_score,
+                "rank": None,
+            }
+
+        except Exception as exc:
+            logger.error(f"✗ Failed {resume_path.name}: {exc}")
+            await session.rollback()
+            return None
+
+    async def _rank_and_persist(self, role: JobRole, candidates: list[dict]) -> None:
+        """Re-rank all candidates for a role and persist ranks to DB."""
+        if not candidates:
+            return
 
         async with self._session_factory() as session:
-            for resume_path in unprocessed:
-                result = await self._process_resume(
-                    session, resume_path, folder_name, jd_entry, jd_embedding
-                )
-                if result:
-                    role_candidates.append(result)
+            # Load all candidates for this role from DB
+            result = await session.execute(
+                select(Candidate)
+                .where(Candidate.job_role_id == role.id)
+                .order_by(Candidate.final_score.desc())
+            )
+            all_candidates = list(result.scalars().all())
+
+            for rank, cand in enumerate(all_candidates, start=1):
+                cand.rank = rank
+
             await session.commit()
+            logger.info(f"Ranked {len(all_candidates)} candidates for {role.role_name}")
 
-        # Rank the newly processed candidates (plus previously processed in DB)
-        ranked = rank_candidates(role_candidates)
+    # ── Public API ────────────────────────────────────────────────────────────
 
-        # Persist ranks back to DB
-        async with self._session_factory() as session:
-            for cand_dict in ranked:
-                from sqlalchemy import update
-                import uuid as _uuid
-                cand_id = cand_dict.get("id")
-                rank_val = cand_dict.get("rank")
-                if cand_id and rank_val:
-                    await session.execute(
-                        update(Candidate)
-                        .where(Candidate.id == _uuid.UUID(cand_id))
-                        .values(rank=rank_val)
-                    )
-            await session.commit()
-
-        return folder_name, ranked
-
-    # ── Public entry point ────────────────────────────────────────────────
-
-    async def run_all(self, generate_report: bool = True) -> PipelineResult:
-        """
-        Process all role folders and optionally generate the Excel report.
-        This is the main entry point for the automated pipeline.
-        """
+    async def run_all(
+        self,
+        owner_id: Optional[uuid.UUID] = None,
+        generate_report: bool = True,
+    ) -> PipelineResult:
+        """Run pipeline for all active roles (optionally filtered by owner)."""
         result = PipelineResult()
-        folders = self._discover_role_folders()
+        roles = await self._load_active_roles(owner_id=owner_id)
 
-        if not folders:
-            logger.warning("No role folders found.  Nothing to process.")
+        if not roles:
+            logger.warning("No active roles found in DB. Add roles in the Job Roles tab.")
             return result
 
-        all_role_candidates: dict[str, list[dict]] = {}
+        role_candidates: dict[str, list] = {}
 
-        for folder in folders:
-            role_name, candidates = await self._process_role_folder(folder)
-            result.roles_processed.append(role_name)
-            result.total_resumes += len(candidates)
-            if candidates:
-                all_role_candidates[role_name] = candidates
+        for role in roles:
+            folder = self._resolve_folder(role)
+            logger.info(f"Processing role: {role.role_name} → {folder}")
 
-        if generate_report and all_role_candidates:
-            result.excel_path = generate_excel_report(all_role_candidates)
+            if not role.job_description:
+                logger.warning(f"Role '{role.role_name}' has no JD — skipping")
+                continue
 
-        logger.info(
-            f"Pipeline complete: {result.total_resumes} resumes processed "
-            f"across {len(result.roles_processed)} roles."
-        )
+            jd_embedding = embed_text(role.job_description)
+            unprocessed = self._get_unprocessed_resumes(folder)
+            logger.info(f"  Found {len(unprocessed)} new resume(s) in {folder}")
+
+            processed_candidates = []
+            async with self._session_factory() as session:
+                for resume_path in unprocessed:
+                    cand = await self._process_resume(
+                        resume_path, role, jd_embedding, session
+                    )
+                    if cand:
+                        processed_candidates.append(cand)
+                        result.total_resumes += 1
+                    else:
+                        result.skipped += 1
+
+            await self._rank_and_persist(role, processed_candidates)
+            result.roles_processed.append(role.role_name)
+            role_candidates[role.role_name] = processed_candidates
+
+        if generate_report and result.total_resumes > 0:
+            try:
+                result.excel_path = generate_excel_report(role_candidates)
+            except Exception as exc:
+                logger.error(f"Excel report failed: {exc}")
+
+        logger.info(f"Pipeline complete: {result}")
         return result
 
     async def run_role(
         self,
         folder_name: str,
-        generate_report: bool = True,
-    ) -> tuple[str, list[dict]]:
-        """Process a single role folder on demand."""
-        folder = settings.APPLICATIONS_DIR / folder_name
-        if not folder.exists():
-            raise FileNotFoundError(f"Role folder not found: {folder}")
-        role_name, candidates = await self._process_role_folder(folder)
-        if generate_report and candidates:
-            generate_excel_report({role_name: candidates})
-        return role_name, candidates
+        owner_id: Optional[uuid.UUID] = None,
+        jd_override: Optional[str] = None,
+    ) -> PipelineResult:
+        """Run pipeline for a single role by folder_name."""
+        result = PipelineResult()
+        roles = await self._load_active_roles(
+            owner_id=owner_id, folder_name=folder_name
+        )
+
+        if not roles:
+            # Try without owner filter (for backward compat)
+            roles = await self._load_active_roles(folder_name=folder_name)
+
+        if not roles:
+            logger.warning(f"No active role found for folder '{folder_name}'")
+            return result
+
+        role = roles[0]
+        jd_text = jd_override or role.job_description
+
+        if not jd_text:
+            logger.warning(f"Role '{role.role_name}' has no JD — cannot score resumes")
+            return result
+
+        folder = self._resolve_folder(role)
+        logger.info(f"Processing role: {role.role_name} → {folder}")
+
+        jd_embedding = embed_text(jd_text)
+        unprocessed  = self._get_unprocessed_resumes(folder)
+        logger.info(f"  Found {len(unprocessed)} new resume(s)")
+
+        processed_candidates = []
+        async with self._session_factory() as session:
+            for resume_path in unprocessed:
+                cand = await self._process_resume(
+                    resume_path, role, jd_embedding, session
+                )
+                if cand:
+                    processed_candidates.append(cand)
+                    result.total_resumes += 1
+                else:
+                    result.skipped += 1
+
+        await self._rank_and_persist(role, processed_candidates)
+        result.roles_processed.append(role.role_name)
+
+        try:
+            result.excel_path = generate_excel_report(
+                {role.role_name: processed_candidates}
+            )
+        except Exception as exc:
+            logger.error(f"Excel report failed: {exc}")
+
+        logger.info(f"Pipeline complete: {result}")
+        return result
