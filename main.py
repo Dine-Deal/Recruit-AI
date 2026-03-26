@@ -41,7 +41,6 @@ async def _wake_neon(host: str) -> None:
 
 
 async def _create_tables_with_retry(max_attempts: int = 5) -> None:
-    """Initialize database tables with retry logic (runs in background)"""
     db_url = settings.DATABASE_URL
     host = _extract_neon_host(db_url)
 
@@ -71,16 +70,42 @@ async def _create_tables_with_retry(max_attempts: int = 5) -> None:
             await asyncio.sleep(wait)
 
 
+async def _prewarm_models() -> None:
+    """
+    Load the embedding model and spaCy into memory at startup.
+    This prevents the first pipeline run from OOM-crashing Render
+    by front-loading the heavy imports before any request arrives.
+    """
+    try:
+        logger.info("Pre-warming embedding model…")
+        from pipeline.embeddings import get_model
+        await asyncio.get_event_loop().run_in_executor(None, get_model)
+        logger.info("Embedding model ready ✓")
+    except Exception as exc:
+        logger.warning(f"Embedding model pre-warm failed: {exc}")
+
+    try:
+        logger.info("Pre-warming spaCy model…")
+        from pipeline.resume_parser import get_nlp
+        await asyncio.get_event_loop().run_in_executor(None, get_nlp)
+        logger.info("spaCy model ready ✓")
+    except Exception as exc:
+        logger.warning(f"spaCy pre-warm failed: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.ensure_directories()
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
-    
-    # Start database initialization in background (non-blocking)
+
+    # Start DB init in background (non-blocking)
     asyncio.create_task(_create_tables_with_retry())
-    
+
+    # Pre-warm ML models so first pipeline run doesn't OOM
+    asyncio.create_task(_prewarm_models())
+
     yield
-    
+
     await engine.dispose()
     logger.info("Shutting down ATS API.")
 
@@ -94,15 +119,20 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-
+# ── CORS — explicitly list all allowed origins ────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_origins=[
+        "https://recruitai-sand.vercel.app",   # production frontend
+        "http://localhost:5173",                # Vite dev
+        "http://localhost:3000",                # CRA dev
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 app.include_router(auth_router)
 app.include_router(roles_router)
@@ -114,10 +144,9 @@ app.include_router(upload_router)
 
 @app.get("/health", tags=["health"])
 async def health() -> dict:
-    """Health check endpoint - returns immediately even if DB is initializing"""
     try:
         from sqlalchemy import text
-        async with asyncio.timeout(2):  # Quick timeout to avoid blocking
+        async with asyncio.timeout(2):
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
         db_status = "connected"
@@ -135,7 +164,6 @@ async def health() -> dict:
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
