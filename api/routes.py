@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, List, Optional
 
 from fastapi import (
     APIRouter,
@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from models.database import Candidate, JobRole, User, get_db
 from pipeline.jd_manager import get_jd_manager
-from pipeline.orchestrator import PipelineOrchestrator
+from pipeline.orchestrator import PipelineOrchestrator, UploadedFile
 
 
 # ── Security ──────────────────────────────────────────────────────────────────
@@ -106,7 +106,7 @@ class JobRoleIn(BaseModel):
     good_to_have_skills: Optional[list[str]] = None
     minimum_experience: Optional[int] = 0
     status: str = "Active"
-    custom_folder_path: Optional[str] = None   # recruiter-provided folder path
+    custom_folder_path: Optional[str] = None
 
 
 class JobRoleOut(BaseModel):
@@ -212,18 +212,17 @@ async def get_role(role_id: uuid.UUID, db: DB, user: CurrentUser) -> JobRole:
 
 @roles_router.post("/", response_model=JobRoleOut, status_code=201)
 async def create_role(payload: JobRoleIn, db: DB, user: CurrentUser) -> JobRole:
-    # Check for existing role with same folder_name — prevent duplicates
     existing = await db.execute(
         select(JobRole).where(
             JobRole.folder_name == payload.folder_name,
-            JobRole.owner_id == user.id
+            JobRole.owner_id == user.id,
         )
     )
     if existing.scalar_one_or_none():
         raise HTTPException(
             400,
             f"A role with folder_name '{payload.folder_name}' already exists. "
-            "Use Edit to update it instead of creating a new one."
+            "Use Edit to update it instead.",
         )
     role = JobRole(**payload.model_dump(), owner_id=user.id)
     db.add(role)
@@ -237,28 +236,20 @@ async def create_role(payload: JobRoleIn, db: DB, user: CurrentUser) -> JobRole:
 async def update_role(
     role_id: uuid.UUID, payload: JobRoleIn, db: DB, user: CurrentUser
 ) -> JobRole:
-    """
-    Update a job role's JD and requirements.
-    Candidate data is NEVER touched — only the role definition changes.
-    """
     result = await db.execute(select(JobRole).where(JobRole.id == role_id, JobRole.owner_id == user.id))
     role = result.scalar_one_or_none()
     if not role:
         raise HTTPException(404, "Role not found")
-
-    # Update only the JD fields — never delete candidates
-    role.role_name = payload.role_name
-    role.job_description = payload.job_description
-    role.must_have_skills = payload.must_have_skills
+    role.role_name           = payload.role_name
+    role.job_description     = payload.job_description
+    role.must_have_skills    = payload.must_have_skills
     role.good_to_have_skills = payload.good_to_have_skills
-    role.minimum_experience = payload.minimum_experience
-    role.status = payload.status
-    # folder_name is intentionally NOT updated — it would break file paths
-
+    role.minimum_experience  = payload.minimum_experience
+    role.status              = payload.status
     await db.commit()
     await db.refresh(role)
     get_jd_manager().upsert(payload.model_dump())
-    logger.info(f"Role '{role.role_name}' JD updated — candidate data preserved.")
+    logger.info(f"Role '{role.role_name}' updated — candidates preserved.")
     return role
 
 
@@ -267,45 +258,23 @@ async def delete_role(
     role_id: uuid.UUID,
     db: DB,
     user: CurrentUser,
-    delete_candidates: bool = Query(
-        default=False,
-        description="Set to true to also delete all candidates. Default: candidates are kept.",
-    ),
+    delete_candidates: bool = Query(default=False),
 ) -> Response:
-    """
-    Delete a job role.
-    By default candidates are KEPT (job_role_id becomes NULL).
-    Pass ?delete_candidates=true to also wipe candidate records.
-    """
     result = await db.execute(select(JobRole).where(JobRole.id == role_id, JobRole.owner_id == user.id))
     role = result.scalar_one_or_none()
     if not role:
         raise HTTPException(404, "Role not found")
-
-    # Count candidates before deleting
     count_result = await db.execute(
         select(func.count(Candidate.id)).where(Candidate.job_role_id == role_id)
     )
     candidate_count = count_result.scalar() or 0
-
     if delete_candidates and candidate_count > 0:
-        # Explicitly delete candidates only when recruiter opts in
-        cands = await db.execute(
-            select(Candidate).where(Candidate.job_role_id == role_id)
-        )
+        cands = await db.execute(select(Candidate).where(Candidate.job_role_id == role_id))
         for cand in cands.scalars().all():
             await db.delete(cand)
-        logger.warning(
-            f"Deleted {candidate_count} candidates for role '{role.role_name}' "
-            "(delete_candidates=true was passed)"
-        )
+        logger.warning(f"Deleted {candidate_count} candidates for role '{role.role_name}'")
     else:
-        # Default: candidates survive, job_role_id becomes NULL via SET NULL FK
-        logger.info(
-            f"Role '{role.role_name}' deleted — "
-            f"{candidate_count} candidate(s) preserved with role_name='{role.role_name}'"
-        )
-
+        logger.info(f"Role '{role.role_name}' deleted — {candidate_count} candidate(s) preserved.")
     await db.delete(role)
     await db.commit()
     return Response(status_code=204)
@@ -323,7 +292,7 @@ async def list_candidates(
     role_id: Optional[uuid.UUID] = None,
     min_score: float = Query(default=0.0, ge=0, le=1),
     min_experience: float = Query(default=0.0, ge=0),
-    skills: Optional[str] = Query(default=None, description="Comma-separated skills filter"),
+    skills: Optional[str] = Query(default=None),
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[Candidate]:
@@ -333,7 +302,6 @@ async def list_candidates(
         .where(JobRole.owner_id == user.id)
         .order_by(Candidate.final_score.desc())
     )
-
     if role_id:
         stmt = stmt.where(Candidate.job_role_id == role_id)
     if min_score > 0:
@@ -343,17 +311,9 @@ async def list_candidates(
     if skills:
         skill_list = [s.strip().lower() for s in skills.split(",")]
         for skill in skill_list:
-            # Use JSON_EXTRACT for SQLite, array_to_string for Postgres
-            from config import settings as _s
-            if "sqlite" in _s.DATABASE_URL:
-                stmt = stmt.where(
-                    func.lower(func.coalesce(Candidate.skills, "")).contains(skill)
-                )
-            else:
-                stmt = stmt.where(
-                    func.lower(func.array_to_string(Candidate.skills, " ")).contains(skill)
-                )
-
+            stmt = stmt.where(
+                func.lower(func.array_to_string(Candidate.skills, " ")).contains(skill)
+            )
     stmt = stmt.limit(limit).offset(offset)
     result = await db.execute(stmt)
     return result.scalars().all()
@@ -391,50 +351,73 @@ pipeline_router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 _pipeline_status: dict = {"running": False, "last_run": None, "last_result": None}
 
 
-def _run_pipeline_bg(role: Optional[str] = None) -> None:
-    import asyncio as _asyncio
-    orch = PipelineOrchestrator()
-    loop = _asyncio.new_event_loop()
+async def _run_pipeline_bg(
+    uploaded_files: list[UploadedFile],
+    jd_text:        Optional[str],
+    role:           Optional[str],
+    owner_id:       uuid.UUID,
+) -> None:
     try:
-        if role:
-            result = loop.run_until_complete(orch.run_role(role))
-        else:
-            result = loop.run_until_complete(orch.run_all())
-        # Store a clean summary — not the raw Python object
-        if hasattr(result, "to_dict"):
-            _pipeline_status["last_result"] = result.to_dict()
-        elif isinstance(result, tuple):
-            role_name, candidates = result
-            _pipeline_status["last_result"] = {
-                "roles": 1,
-                "processed": len(candidates),
-                "skipped": 0,
-                "errors": 0,
-            }
-        else:
-            _pipeline_status["last_result"] = str(result)
-        _pipeline_status["last_run"] = datetime.now(timezone.utc).isoformat()
+        orch   = PipelineOrchestrator()
+        result = await orch.run_with_files(
+            uploaded_files  = uploaded_files,
+            jd_text         = jd_text,
+            folder_name     = role,
+            owner_id        = owner_id,
+            generate_report = True,
+        )
+        _pipeline_status["last_result"] = result.to_dict()
+        _pipeline_status["last_run"]    = datetime.now(timezone.utc).isoformat()
+        logger.info(f"Pipeline complete: {result}")
     except Exception as exc:
         logger.error(f"Pipeline background run failed: {exc}")
         _pipeline_status["last_result"] = f"Error: {exc}"
     finally:
         _pipeline_status["running"] = False
-        loop.close()
 
 
 @pipeline_router.post("/run", response_model=PipelineStatusOut)
 async def trigger_pipeline(
     background_tasks: BackgroundTasks,
-    _: CurrentUser,
-    role: Optional[str] = Query(default=None),
+    current_user:     CurrentUser,
+    files:    List[UploadFile]     = File(...),
+    jd_text:  Optional[str]        = Form(None),
+    jd_file:  Optional[UploadFile] = File(None),
+    role:     Optional[str]        = Form(None),
 ) -> PipelineStatusOut:
     if _pipeline_status["running"]:
         raise HTTPException(409, "Pipeline is already running")
+
+    # Read all file bytes eagerly before handing to background task
+    uploaded: list[UploadedFile] = []
+    for f in files:
+        content = await f.read()
+        uploaded.append(UploadedFile(filename=f.filename or "resume", content=content))
+
+    # Read JD file bytes if provided
+    jd_text_resolved = jd_text
+    if not jd_text_resolved and jd_file:
+        jd_bytes  = await jd_file.read()
+        jd_suffix = Path(jd_file.filename or "jd.pdf").suffix.lower()
+        try:
+            from pipeline.resume_parser import parse_resume_bytes
+            jd_parsed        = parse_resume_bytes(jd_bytes, jd_suffix, jd_file.filename or "jd")
+            jd_text_resolved = jd_parsed.get("raw_text", "")
+        except Exception as exc:
+            logger.warning(f"Could not parse JD file: {exc}")
+
     _pipeline_status["running"] = True
-    background_tasks.add_task(_run_pipeline_bg, role)
+    background_tasks.add_task(
+        _run_pipeline_bg,
+        uploaded,
+        jd_text_resolved,
+        role,
+        current_user.id,
+    )
+
     return PipelineStatusOut(
-        status="started",
-        message=f"Pipeline started for role={role or 'ALL'}",
+        status  = "started",
+        message = f"Processing {len(uploaded)} resume(s) for role={role or 'ALL'}",
     )
 
 
@@ -454,9 +437,9 @@ async def download_report(_: CurrentUser) -> FileResponse:
     if not path.exists():
         raise HTTPException(404, "Report not yet generated — run the pipeline first.")
     return FileResponse(
-        path=str(path),
-        filename="Candidate_Ranking.xlsx",
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        path     = str(path),
+        filename = "Candidate_Ranking.xlsx",
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 
@@ -475,12 +458,9 @@ async def upload_resume(
     ext = Path(file.filename or "").suffix.lower()
     if ext not in allowed_ext:
         raise HTTPException(400, f"Unsupported file type: {ext}")
-
     dest_dir = settings.APPLICATIONS_DIR / role_folder
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / (file.filename or "resume" + ext)
-
+    dest    = dest_dir / (file.filename or "resume" + ext)
     content = await file.read()
     dest.write_bytes(content)
-
     return {"message": "Resume uploaded", "path": str(dest), "role": role_folder}
