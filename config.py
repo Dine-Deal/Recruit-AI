@@ -4,11 +4,10 @@ config.py — Centralised application settings loaded from environment / .env
 
 from __future__ import annotations
 
-import os
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AnyHttpUrl, Field, SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,7 +16,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
-        extra="ignore",   # ignore unknown env vars — prevents BOM/encoding issues
+        extra="ignore",
     )
 
     # ── Application ───────────────────────────────────────────────────────────
@@ -41,10 +40,10 @@ class Settings(BaseSettings):
     CANDIDATE_RANKING_OUTPUT: Path = Field(default=Path("Outputs/Candidate_Ranking.xlsx"))
 
     # ── NLP & Embeddings ──────────────────────────────────────────────────────
-    SPACY_MODEL: str = "en_core_web_lg"
+    SPACY_MODEL: str = "en_core_web_sm"                          # ← CHANGED
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     EMBEDDING_BATCH_SIZE: int = 32
-    EMBEDDING_DEVICE: str = "cpu"   # "cuda" if GPU available
+    EMBEDDING_DEVICE: str = "cpu"
 
     # ── Scoring Weights ───────────────────────────────────────────────────────
     WEIGHT_SEMANTIC: float = 0.70
@@ -55,25 +54,20 @@ class Settings(BaseSettings):
     MS_TENANT_ID: str = ""
     MS_CLIENT_ID: str = ""
     MS_CLIENT_SECRET: SecretStr = SecretStr("")
-    MS_USER_EMAIL: str = ""          # recruiter mailbox
+    MS_USER_EMAIL: str = ""
     MS_GRAPH_SCOPE: list[str] = ["https://graph.microsoft.com/.default"]
-    EMAIL_POLL_INTERVAL_SECONDS: int = 300   # 5 min
+    EMAIL_POLL_INTERVAL_SECONDS: int = 300
 
     # ── Auth (JWT) ────────────────────────────────────────────────────────────
     SECRET_KEY: SecretStr = SecretStr("CHANGE_ME_IN_PRODUCTION_use_openssl_rand_hex_32")
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480   # 8 hrs
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
 
     # ── CORS ──────────────────────────────────────────────────────────────────
-    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:5173,http://localhost:4173"
+    ALLOWED_ORIGINS: str = "https://recruitai-sand.vercel.app,http://localhost:3000,http://localhost:5173,http://localhost:4173"  # ← ADDED Vercel URL
 
     def ensure_directories(self) -> None:
-        """Create all required directories on startup."""
-        for d in [
-            self.APPLICATIONS_DIR,
-            self.OUTPUT_DIR,
-            self.FAISS_INDEX_DIR,
-        ]:
+        for d in [self.APPLICATIONS_DIR, self.OUTPUT_DIR, self.FAISS_INDEX_DIR]:
             d.mkdir(parents=True, exist_ok=True)
 
 
