@@ -1,0 +1,91 @@
+# ─────────────────────────────────────────────
+# Recruit-AI — .gitignore
+# ─────────────────────────────────────────────
+
+# ── Python ────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+
+# ── Environment / Secrets ─────────────────────
+.env
+.env.local
+.env.production
+.env.staging
+# Keep the example file
+!.env.example
+
+# ── ML Model Caches ───────────────────────────
+# HuggingFace / sentence-transformers cache
+~/.cache/huggingface/
+.cache/
+models/
+*.bin
+*.safetensors
+*.onnx
+*.pt
+*.pth
+
+# spaCy models (downloaded separately)
+en_core_web_sm/
+en_core_web_md/
+en_core_web_lg/
+
+# ── App Runtime Files ─────────────────────────
+backend/temp_cache/
+backend/processed_resumes.json
+
+# ── Node / Frontend ───────────────────────────
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+.npm/
+.yarn/
+
+# ── IDE / Editor ──────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────
+*.log
+logs/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ── Testing ───────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+
+# ── Misc ──────────────────────────────────────
+*.zip
+*.tar.gz
+*.bak
+.mypy_cache/
+.ruff_cache/

@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: recruit-ai-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: |
+      pip install -r requirements.txt
+      python -m spacy download en_core_web_sm
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: ALLOWED_ORIGINS
+        value: "https://recruit-ai.vercel.app"   # Replace with your Vercel URL
+      # Optional — only needed for OneDrive Graph API mode
+      # - key: MS_TENANT_ID
+      #   value: your-tenant-id
+      # - key: MS_CLIENT_ID
+      #   value: your-client-id
+      # - key: MS_CLIENT_SECRET
+      #   value: your-client-secret
+      # - key: MS_USER_EMAIL
+      #   value: user@domain.com
+    disk:
+      name: resume-cache
+      mountPath: /opt/render/project/src/backend/temp_cache
+      sizeGB: 1
