@@ -63,32 +63,51 @@ class PipelineOrchestrator:
             logger.warning("No resume files found.")
             return []
 
-        # 2. Filter duplicates
-        unprocessed = self._loader.filter_unprocessed(files)
-        logger.info(f"Unprocessed (new) files: {len(unprocessed)}")
-
-        # If all already processed, still score them against the new JD
-        files_to_process = unprocessed if unprocessed else files
-
-        # 3. Embed JD once
+        # 2. Embed JD once
         logger.info("Embedding job description...")
         jd_embedding = await _run_in_executor(embed_text, jd_text)
 
-        # 4. Process each resume
+        # 3. Process each resume concurrently with limit of 50
         candidates: list[dict] = []
-        for resume_path in files_to_process:
-            result = await self._process_one(
-                resume_path,
-                jd_text=jd_text,
-                jd_embedding=jd_embedding,
-            )
-            if result:
-                candidates.append(result)
+        semaphore = asyncio.Semaphore(50)
+
+        async def process_file(resume_path: Path):
+            async with semaphore:
                 try:
                     h = compute_file_hash(resume_path)
-                    self._loader.mark_processed(resume_path, h)
-                except Exception:
-                    pass
+                    cached = self._loader.get_cached_parsed(h)
+                    if cached:
+                        # Cached duplicate: re-score directly
+                        resume_text = build_resume_embedding_text(cached)
+                        resume_vec = await _run_in_executor(embed_text, resume_text)
+                        sim = cosine_similarity(resume_vec, jd_embedding)
+                        scores = score_candidate(
+                            parsed=cached,
+                            semantic_similarity=sim,
+                            jd_text=jd_text,
+                        )
+                        c = {**cached, **scores}
+                        c["file_path"] = str(resume_path)
+                        logger.info(f"  ✓ {resume_path.name} (CACHED): final={c['final_score']:.3f}")
+                        return c
+                    else:
+                        # New file: Parse and save
+                        c = await self._process_one(resume_path, jd_text, jd_embedding)
+                        if c:
+                            parsed_only = {k: v for k, v in c.items() if k not in ["semantic_score", "skill_score", "experience_score", "final_score", "rank"]}
+                            self._loader.save_cached_parsed(h, parsed_only)
+                            self._loader.mark_processed(resume_path, h)
+                        return c
+                except Exception as exc:
+                    logger.error(f"  ✗ {resume_path.name}: {exc}")
+                    return None
+
+        tasks = [process_file(fp) for fp in files]
+        results = await asyncio.gather(*tasks)
+        
+        for r in results:
+            if r:
+                candidates.append(r)
 
         # 5. Rank and return Top N
         ranked = rank_candidates(candidates, top_n=settings.TOP_N)

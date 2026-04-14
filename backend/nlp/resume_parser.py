@@ -260,6 +260,12 @@ def _looks_like_name(text: str) -> bool:
         return False
     if any(c.isdigit() for c in text):
         return False
+    if "@" in text or ".com" in text.lower():
+        return False
+    if "://" in text or "www." in text.lower():
+        return False
+    if re.search(r"^(email|phone|mobile|contact|address)s?[:\-]?\s*", text, re.IGNORECASE):
+        return False
     if not all(w[0].isupper() for w in words if w and w[0].isalpha()):
         return False
     lwords = {w.lower().rstrip(".,") for w in words}
@@ -310,15 +316,6 @@ def extract_name(text: str, nlp: spacy.Language) -> Optional[str]:
     )
     if m:
         return _normalize_name(m.group(1).strip())
-
-    # Strategy 4: Derive from email
-    email = extract_email(text)
-    if email:
-        local = email.split("@")[0]
-        parts = re.split(r"[._\-]", local)
-        parts = [p.capitalize() for p in parts if p.isalpha() and len(p) > 1]
-        if 2 <= len(parts) <= 3:
-            return " ".join(parts)
 
     return None
 

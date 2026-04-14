@@ -127,14 +127,19 @@ export default function ResumeSourceInput({ value, onChange }) {
       {mode === 'local' && (
         <div style={styles.fieldGroup}>
           <div>
-            <span style={styles.fieldLabel}>Folder Path</span>
+            <span style={styles.fieldLabel}>Upload Folder</span>
             <input
+              type="file"
               style={styles.input}
-              placeholder="e.g. /Users/you/resumes  or  C:\Resumes\SWE"
-              value={value.localPath || ''}
-              onChange={(e) => set({ localPath: e.target.value })}
+              webkitdirectory=""
+              directory=""
+              multiple
+              onChange={(e) => {
+                const files = Array.from(e.target.files)
+                set({ localFiles: files })
+              }}
             />
-            <p style={styles.hint}>Absolute path to a local folder containing PDF/DOCX resumes</p>
+            <p style={styles.hint}>Select a local folder containing PDF/DOCX resumes ({value.localFiles?.length || 0} files selected)</p>
           </div>
         </div>
       )}

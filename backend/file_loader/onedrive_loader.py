@@ -53,8 +53,16 @@ def download_from_share_link(share_url: str, dest_dir: Path) -> Path:
     download_url = _share_link_to_download_url(share_url)
 
     logger.info(f"Downloading from OneDrive share: {share_url}")
-    resp = requests.get(download_url, timeout=30, allow_redirects=True)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(download_url, timeout=30, allow_redirects=True)
+        resp.raise_for_status()
+    except requests.exceptions.Timeout:
+        raise ValueError("Timeout while trying to download file from OneDrive.")
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"Invalid OneDrive link or connection error: {e}")
+
+    if "text/html" in resp.headers.get("Content-Type", ""):
+        raise ValueError("Received HTML instead of a file. The link might lead to a preview page or require authentication.")
 
     # Determine filename from Content-Disposition or URL
     cd = resp.headers.get("Content-Disposition", "")

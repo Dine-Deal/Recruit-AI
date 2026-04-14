@@ -19,7 +19,7 @@ def iter_resume_files(folder_path: str | Path) -> Iterator[Path]:
     if not folder.is_dir():
         raise NotADirectoryError(f"Not a directory: {folder}")
 
-    for f in sorted(folder.iterdir()):
+    for f in sorted(folder.rglob("*")):
         if f.suffix.lower() in SUPPORTED_EXTENSIONS and f.is_file():
             yield f
 

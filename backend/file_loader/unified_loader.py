@@ -24,6 +24,8 @@ class UnifiedLoader:
     def __init__(self) -> None:
         self._cache_dir = settings.TEMP_DIR / "onedrive_cache"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+        self._parsed_cache_dir = settings.TEMP_DIR / "parsed_cache"
+        self._parsed_cache_dir.mkdir(parents=True, exist_ok=True)
         self._registry = _load_registry()
 
     def load_files(self, source: dict) -> list[Path]:
@@ -97,6 +99,26 @@ class UnifiedLoader:
         if self._cache_dir.exists():
             shutil.rmtree(self._cache_dir)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def get_cached_parsed(self, file_hash: str) -> dict | None:
+        """Retrieve parsed dictionary for a file hash if it exists."""
+        path = self._parsed_cache_dir / f"{file_hash}.json"
+        if path.exists():
+            try:
+                with open(path) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return None
+
+    def save_cached_parsed(self, file_hash: str, parsed: dict) -> None:
+        """Save parsed dictionary for a file hash."""
+        path = self._parsed_cache_dir / f"{file_hash}.json"
+        try:
+            with open(path, "w") as f:
+                json.dump(parsed, f)
+        except Exception as e:
+            logger.warning(f"Could not save parsed cache for {file_hash}: {e}")
 
 
 # ── Registry helpers ──────────────────────────────────────────────────────────

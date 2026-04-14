@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -69,7 +69,7 @@ async def run_pipeline(
 
     # Resume source inputs
     source_type: str = Form(...),           # "local" | "onedrive_link" | "onedrive_api"
-    local_folder: Optional[str] = Form(default=None),
+    resume_files: List[UploadFile] = File(default=[]),
     onedrive_links: Optional[str] = Form(default=None),   # comma-separated URLs
     onedrive_folder: Optional[str] = Form(default=None),
 ):
@@ -97,9 +97,23 @@ async def run_pipeline(
 
     # ── 2. Build source descriptor ────────────────────────────────────────────
     if source_type == "local":
-        if not local_folder:
-            raise HTTPException(400, "local_folder is required for source_type=local")
-        source = {"type": "local", "path": local_folder}
+        if not resume_files:
+            raise HTTPException(400, "resume_files is required for source_type=local")
+        
+        # Save uploaded files to a temp directory
+        temp_dir = tempfile.mkdtemp(dir=settings.TEMP_DIR)
+        temp_folder = Path(temp_dir)
+        for rf in resume_files:
+            if rf.filename:
+                # rf.filename from webkitdirectory might include subfolders: "Dir/subdir/file.pdf"
+                file_path = temp_folder / rf.filename
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Use write_bytes for simplicity since we await read()
+                content = await rf.read()
+                file_path.write_bytes(content)
+        
+        source = {"type": "local", "path": str(temp_folder)}
 
     elif source_type == "onedrive_link":
         if not onedrive_links:

@@ -148,7 +148,7 @@ const styles = {
 function validate(jd, source) {
   if (jd.type === 'text' && !(jd.text || '').trim()) return 'Please paste a job description or upload a JD file.'
   if (jd.type === 'file' && !jd.file) return 'Please upload a JD file or paste text.'
-  if (source.mode === 'local' && !(source.localPath || '').trim()) return 'Please enter a local folder path.'
+  if (source.mode === 'local' && (!source.localFiles || source.localFiles.length === 0)) return 'Please select a local folder containing resumes.'
   const odMode = source.onedriveMode || 'link'
   if (source.mode === 'onedrive' && odMode === 'link' && !(source.onedriveLinks || '').trim())
     return 'Please paste at least one OneDrive share link.'
@@ -173,7 +173,7 @@ export default function Home() {
 
   // Safe setter — always merges over full defaults so no key ever becomes undefined
   const SOURCE_DEFAULTS = {
-    mode: 'local', localPath: '', onedriveMode: 'link',
+    mode: 'local', localFiles: [], onedriveMode: 'link',
     onedriveLinks: '', onedriveApiFolder: '',
     mustHave: '', goodToHave: '', minExperience: '',
   }
@@ -210,7 +210,11 @@ export default function Home() {
 
       if (source.mode === 'local') {
         fd.append('source_type', 'local')
-        fd.append('local_folder', localPath)
+        if (source.localFiles && source.localFiles.length > 0) {
+          source.localFiles.forEach(file => {
+            fd.append('resume_files', file)
+          })
+        }
       } else if (odMode === 'link') {
         fd.append('source_type', 'onedrive_link')
         fd.append('onedrive_links', onedriveLinks)
