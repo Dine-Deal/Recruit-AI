@@ -37,9 +37,7 @@ _executor = ThreadPoolExecutor(max_workers=1)
 async def _run_in_executor(fn, *args):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(_executor, fn, *args)
-def preload_models():
-       # your model loading logic here
-       pass
+
 
 def preload_models() -> None:
     """
