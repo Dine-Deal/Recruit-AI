@@ -31,23 +31,37 @@ from loguru import logger
 from config import settings
 
 
-# ── spaCy singleton ───────────────────────────────────────────────────────────
+# ── spaCy singleton (thread-safe) ────────────────────────────────────────────
+# ThreadPoolExecutor runs parse_resume() concurrently. Without a lock, every
+# thread hits `_NLP is None` simultaneously and loads its own copy of spaCy,
+# multiplying RAM usage by the number of workers. The lock ensures only one
+# thread loads the model; all others wait and reuse it.
+
+import threading
 
 _NLP: Optional[spacy.Language] = None
+_NLP_LOCK = threading.Lock()
 
 
 def get_nlp() -> spacy.Language:
     global _NLP
     if _NLP is None:
-        logger.info(f"Loading spaCy model: {settings.SPACY_MODEL}")
-        try:
-            _NLP = spacy.load(settings.SPACY_MODEL)
-        except OSError:
-            raise OSError(
-                f"spaCy model '{settings.SPACY_MODEL}' not found. "
-                "Run: python -m spacy download en_core_web_sm"
-            )
+        with _NLP_LOCK:          # only one thread loads; others wait here
+            if _NLP is None:     # double-checked locking pattern
+                logger.info(f"Loading spaCy model: {settings.SPACY_MODEL}")
+                try:
+                    _NLP = spacy.load(settings.SPACY_MODEL)
+                except OSError:
+                    raise OSError(
+                        f"spaCy model '{settings.SPACY_MODEL}' not found. "
+                        "Run: python -m spacy download en_core_web_sm"
+                    )
     return _NLP
+
+
+def preload_nlp() -> None:
+    """Call once at app startup to load spaCy before any requests arrive."""
+    get_nlp()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -260,12 +274,6 @@ def _looks_like_name(text: str) -> bool:
         return False
     if any(c.isdigit() for c in text):
         return False
-    if "@" in text or ".com" in text.lower():
-        return False
-    if "://" in text or "www." in text.lower():
-        return False
-    if re.search(r"^(email|phone|mobile|contact|address)s?[:\-]?\s*", text, re.IGNORECASE):
-        return False
     if not all(w[0].isupper() for w in words if w and w[0].isalpha()):
         return False
     lwords = {w.lower().rstrip(".,") for w in words}
@@ -316,6 +324,15 @@ def extract_name(text: str, nlp: spacy.Language) -> Optional[str]:
     )
     if m:
         return _normalize_name(m.group(1).strip())
+
+    # Strategy 4: Derive from email
+    email = extract_email(text)
+    if email:
+        local = email.split("@")[0]
+        parts = re.split(r"[._\-]", local)
+        parts = [p.capitalize() for p in parts if p.isalpha() and len(p) > 1]
+        if 2 <= len(parts) <= 3:
+            return " ".join(parts)
 
     return None
 

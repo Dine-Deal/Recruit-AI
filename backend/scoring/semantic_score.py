@@ -3,11 +3,14 @@ scoring/semantic_score.py — Embedding-based semantic similarity.
 Uses sentence-transformers/all-MiniLM-L6-v2.
 
 Fixes:
-  - education field is now a list of dicts (v3 parser); handled via education_display
-  - skills/companies/certifications/projects filtered for None before joining
+  - Thread-safe model singleton with Lock (same pattern as spaCy fix)
+  - preload_embedding_model() for startup pre-warming
+  - education field handles both list-of-dicts (v3 parser) and plain string
+  - All list fields filtered for None before joining
 """
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
 import numpy as np
@@ -16,15 +19,26 @@ from loguru import logger
 from config import settings
 
 _MODEL = None
+_MODEL_LOCK = threading.Lock()
 
 
 def _get_model():
     global _MODEL
     if _MODEL is None:
-        from sentence_transformers import SentenceTransformer
-        logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL}")
-        _MODEL = SentenceTransformer(settings.EMBEDDING_MODEL, device=settings.EMBEDDING_DEVICE)
+        with _MODEL_LOCK:
+            if _MODEL is None:
+                from sentence_transformers import SentenceTransformer
+                logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL}")
+                _MODEL = SentenceTransformer(
+                    settings.EMBEDDING_MODEL,
+                    device=settings.EMBEDDING_DEVICE,
+                )
     return _MODEL
+
+
+def preload_embedding_model() -> None:
+    """Call once at app startup to load the model before requests arrive."""
+    _get_model()
 
 
 def embed_text(text: str) -> np.ndarray:
@@ -39,14 +53,6 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.clip(np.dot(a, b), 0.0, 1.0))
 
 
-def _safe_join(items, sep=", ", limit=None) -> str:
-    """Join a list, skipping None/non-string values."""
-    clean = [str(i) for i in (items or []) if i is not None]
-    if limit:
-        clean = clean[:limit]
-    return sep.join(clean)
-
-
 def build_resume_embedding_text(parsed: dict) -> str:
     """Build rich text representation of a resume for embedding."""
     parts = []
@@ -54,15 +60,14 @@ def build_resume_embedding_text(parsed: dict) -> str:
     if parsed.get("name"):
         parts.append(f"Candidate: {parsed['name']}")
 
-    # Skills — filter None values before joining
+    # Skills — filter None values
     skills = [s for s in (parsed.get("skills") or []) if s is not None]
     if skills:
         parts.append("Skills: " + ", ".join(skills))
 
-    # Education — v3 parser returns a list of dicts; use education_display string
+    # Education — v3 parser returns list of dicts; use education_display string
     edu_display = parsed.get("education_display")
     if not edu_display:
-        # Fallback: education might still be a plain string (legacy)
         edu_raw = parsed.get("education")
         if isinstance(edu_raw, str):
             edu_display = edu_raw
