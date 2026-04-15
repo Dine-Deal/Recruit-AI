@@ -3,7 +3,7 @@ import JDInput from '../components/JDInput'
 import ResumeSourceInput from '../components/ResumeSourceInput'
 import RunPipelineButton from '../components/RunPipelineButton'
 import CandidateTable from '../components/CandidateTable'
-import { runPipeline } from '../services/api'
+import { runPipeline, getJobStatus } from '../services/api'
 
 const styles = {
   header: {
@@ -180,6 +180,7 @@ export default function Home() {
   const setSourceSafe = (patch) =>
     setSource(prev => ({ ...SOURCE_DEFAULTS, ...prev, ...patch }))
   const [loading, setLoading] = useState(false)
+  const [elapsed, setElapsed] = useState(0)   // seconds since job started
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
 
@@ -188,32 +189,33 @@ export default function Home() {
     if (err) { setError(err); return }
     setError(null)
     setLoading(true)
+    setElapsed(0)
     setResult(null)
+
+    // Elapsed-time ticker
+    const startedAt = Date.now()
+    const ticker = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startedAt) / 1000))
+    }, 1000)
 
     try {
       const fd = new FormData()
 
-      // JD — ensure we always send something
+      // JD
       if (jd.type === 'file' && jd.file) {
         fd.append('jd_file', jd.file)
       } else {
         fd.append('jd_text', (jd.text || '').trim())
       }
 
-      // Safely extract all source fields (never undefined)
-      const localPath        = (source.localPath        || '').trim()
-      const onedriveLinks    = (source.onedriveLinks    || '').trim()
-      const onedriveApiFolder= (source.onedriveApiFolder|| '').trim()
-      const mustHave         = (source.mustHave         || '').trim()
-      const goodToHave       = (source.goodToHave       || '').trim()
-      const odMode           = source.onedriveMode || 'link'
+      const onedriveLinks     = (source.onedriveLinks     || '').trim()
+      const onedriveApiFolder = (source.onedriveApiFolder || '').trim()
+      const odMode            = source.onedriveMode || 'link'
 
       if (source.mode === 'local') {
         fd.append('source_type', 'local')
         if (source.localFiles && source.localFiles.length > 0) {
-          source.localFiles.forEach(file => {
-            fd.append('resume_files', file)
-          })
+          source.localFiles.forEach(file => fd.append('resume_files', file))
         }
       } else if (odMode === 'link') {
         fd.append('source_type', 'onedrive_link')
@@ -223,16 +225,34 @@ export default function Home() {
         fd.append('onedrive_folder', onedriveApiFolder)
       }
 
-      if (mustHave)  fd.append('must_have_skills',    mustHave)
-      if (goodToHave) fd.append('good_to_have_skills', goodToHave)
-      if (source.minExperience) fd.append('minimum_experience', source.minExperience)
+      // Start the job — returns immediately with { job_id }
+      const { job_id } = await runPipeline(fd)
 
-      const data = await runPipeline(fd)
-      setResult(data)
+      // Poll every 3 seconds until done or error
+      await new Promise((resolve, reject) => {
+        const poll = setInterval(async () => {
+          try {
+            const status = await getJobStatus(job_id)
+            if (status.status === 'done') {
+              clearInterval(poll)
+              setResult(status.result)
+              resolve()
+            } else if (status.status === 'error') {
+              clearInterval(poll)
+              reject(new Error(status.error || 'Pipeline failed.'))
+            }
+            // else still 'pending' — keep polling
+          } catch (pollErr) {
+            clearInterval(poll)
+            reject(pollErr)
+          }
+        }, 3000)
+      })
     } catch (e) {
       const msg = e.response?.data?.detail || e.message || 'Pipeline failed.'
       setError(msg)
     } finally {
+      clearInterval(ticker)
       setLoading(false)
     }
   }
@@ -289,6 +309,9 @@ export default function Home() {
                 <p style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>Processing Resumes…</p>
                 <p style={{ color: 'var(--text-2)', fontSize: 13 }}>
                   Parsing → Embedding → Scoring → Ranking
+                </p>
+                <p style={{ color: 'var(--text-2)', fontSize: 12, marginTop: 10 }}>
+                  ⏱ {elapsed}s elapsed — results will appear automatically when ready
                 </p>
               </div>
             )}
