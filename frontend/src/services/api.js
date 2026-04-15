@@ -16,10 +16,10 @@ const api = axios.create({
  * Poll getJobStatus(job_id) until status === "done" | "error".
  * @param {FormData} formData
  * @returns {Promise<{ job_id: string, status: string }>}
- */
 export async function runPipeline(formData) {
   const res = await api.post('/run-pipeline', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 10 * 60 * 1000, // 10 mins: Waking a Render instance and uploading files can exceed 30s
   })
   return res.data
 }

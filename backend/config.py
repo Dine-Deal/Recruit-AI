@@ -18,9 +18,6 @@ class Settings:
 
     # NLP
     SPACY_MODEL: str = "en_core_web_sm"
-    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
-    EMBEDDING_DEVICE: str = "cpu"
-    EMBEDDING_BATCH_SIZE: int = 32
 
     # Scoring weights
     WEIGHT_SEMANTIC: float = 0.70

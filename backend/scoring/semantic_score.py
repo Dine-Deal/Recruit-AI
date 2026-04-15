@@ -1,12 +1,14 @@
 """
 scoring/semantic_score.py — Embedding-based semantic similarity.
-Uses sentence-transformers/all-MiniLM-L6-v2.
 
-Fixes:
-  - Thread-safe model singleton with Lock (same pattern as spaCy fix)
-  - preload_embedding_model() for startup pre-warming
-  - education field handles both list-of-dicts (v3 parser) and plain string
-  - All list fields filtered for None before joining
+Uses fastembed (ONNX Runtime) instead of sentence-transformers (PyTorch).
+
+Why the switch:
+  torch==2.3.0 uses ~200-300MB RSS just to be imported, which combined
+  with spaCy (~50MB) and FastAPI base (~80MB) exceeds Render's 512MB limit.
+  fastembed uses onnxruntime (~50MB) — same quality, ~5x lower memory.
+
+Model: BAAI/bge-small-en-v1.5 (384-dim, ~67MB, ONNX)
 """
 from __future__ import annotations
 
@@ -16,10 +18,11 @@ from typing import Optional
 import numpy as np
 from loguru import logger
 
-from config import settings
-
 _MODEL = None
 _MODEL_LOCK = threading.Lock()
+
+# fastembed model to use — small, fast, ONNX-based
+_FASTEMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
 
 def _get_model():
@@ -27,12 +30,10 @@ def _get_model():
     if _MODEL is None:
         with _MODEL_LOCK:
             if _MODEL is None:
-                from sentence_transformers import SentenceTransformer
-                logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL}")
-                _MODEL = SentenceTransformer(
-                    settings.EMBEDDING_MODEL,
-                    device=settings.EMBEDDING_DEVICE,
-                )
+                from fastembed import TextEmbedding
+                logger.info(f"Loading embedding model (fastembed): {_FASTEMBED_MODEL}")
+                _MODEL = TextEmbedding(model_name=_FASTEMBED_MODEL)
+                logger.info("Embedding model ready.")
     return _MODEL
 
 
@@ -44,7 +45,12 @@ def preload_embedding_model() -> None:
 def embed_text(text: str) -> np.ndarray:
     """Encode text → normalised float32 numpy array (384-dim)."""
     model = _get_model()
-    vec = model.encode(text, normalize_embeddings=True, show_progress_bar=False)
+    # fastembed returns a generator of numpy arrays
+    vec = list(model.embed([text]))[0]
+    # Normalise to unit vector for cosine similarity via dot product
+    norm = np.linalg.norm(vec)
+    if norm > 0:
+        vec = vec / norm
     return vec.astype(np.float32)
 
 
